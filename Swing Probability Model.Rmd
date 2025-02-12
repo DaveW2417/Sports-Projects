@@ -1,0 +1,429 @@
+---
+title: "Baseball Research Questionnaire"
+author: "David Wonesh"
+date: "2024-04-15"
+output: pdf_document
+---
+
+##Creating a Swing Probability Model
+
+
+$\newline$ $\indent$ $\indent$ $\indent$It is important to understand the objective of getting swing probabilities before choosing a model. This tends to be whether we prefer a model with a lot of predicting power or a model with a lot of interpretative power that will most likely sacrifice predictive power. I believe the objective of this task was a model with a lot of predicting power. Therefore, I decided to fit an XGboost model in the binary logistic regression family. I chose this model because I have seen this model a lot in the sports analytics literature, specifically for predictive power which performs quite well. Before fitting the model, I had to remove some observations from the data set that I believe did not pertain to the batter truly deciding to swing his bat. These observations included hit by pitches, anything that dealt with bunts, and anything that dealt with pitch outs. Then, I created a binary response called "swing" where it receives a 1 if the event implied that the batter swung his bat and a 0 if the event implied that the batter did not swing his bat.I merged the year1 and year2 data into one dataframe and after some cleaning, I decided to check if there was any major multicollinearity that the XGboost may have trouble with so I checked the correlation among the variables. I found that there was nothing that was too extreme among the numeric variables.
+
+
+$\indent$ $\indent$ $\indent$For model fitting, I chose to fit a model with the most variables first just to see which models play a significant role in determining swing probability. I decided to not include the variables pitch_id, pitcher, and batter because those variables are too specific to the data set and will most likely cause overfitting. Instead, I fit the most complex model with "release_speed", "balls" ,"strikes" ,"plate_x" ,"plate_z", "sz_top",  "sz_bot", "pfx_x", "pfx_z", "pitch_type" as my variables. I trained this model on 75% of the data, which was randomly selected. The other 25% was used for testing. After tuning the hyperparameters, I predicted whether a batter would swing on the testing data if the swing probability given was over 0.5. This model had an accuracy of 86.5%. I looked to see if we could create a more simple model by removing the least significant variables. I used the gain metric to determine this.
+
+| Feature        | Gain         |
+| -------------- | ------------ |
+| sz_top         | 0.223954138  |
+| sz_bot         | 0.223924131  |
+| plate_x        | 0.180133076  |
+| plate_z        | 0.170467049  |
+| strikes        | 0.085056287  |
+| pfx_x          | 0.044847482  |
+| pfx_z          | 0.039409884  |
+| balls          | 0.012565821  |
+| release_speed  | 0.012045535  |
+| pitch_type     | 0.007596596  |
+
+
+$\indent$ $\indent$ $\indent$Based on the table provided, I decided to remove "balls", "release_speed",and "pitch_type" as these variables had very low gain. Removing these variables will give us less concern for an overfitted model. This reduced model had an accuracy of 86% which is not a far drop-off from the previous model. I chose the reduced model as my final model. Just to make sure there were not any underlying issues with my model, I fit a model with the least important predictors and checked its accuracy which was 60%. This is what I would have expected, so I do not see any concerns with model fitting. 
+
+```{r, eval = FALSE}
+##Reading in Year1 and Year2 data
+library(tidyverse) 
+library(gganimate)
+library(cowplot)
+library(repr)
+library(ggplot2)
+year1 <- read_csv("year1.csv")
+
+year2 <- read_csv("year2.csv")
+
+
+##Classifying events that I do not believe provide any valuable 
+##insight into swing probability
+bunt_pitchout_events <- c("hit_by_pitch",
+                          "foul_bunt",
+                          "missed_bunt",
+                          "pitchout",
+                          "bunt_foul_tip",
+                            "foul_pitchout")
+
+##Classifying events that imply that the batter swung
+swing_events <- c("foul",
+                  "hit_into_play",
+                  "swinging_strike",
+                  "foul_tip",
+                  "swinging_strike_blocked")
+
+##I am removing all pitchout, bunts, and hit by pitches from each year. 
+##Then I create a binary variable
+##called swing which will receive a 1 if the batter truly swung the bat, and a 0 if not. 
+year1 <- year1 %>%
+  filter(!(description %in% bunt_pitchout_events)) %>%
+  mutate(swing = 
+           ifelse(description %in% swing_events, 1, 0))
+
+year2 <- year2 %>%
+  filter(!(description %in% bunt_pitchout_events)) %>%
+  mutate(swing = 
+           ifelse(description %in% swing_events, 1, 0))
+
+
+##Merging the year2 and year1 data
+merged_data <- rbind(year1,year2)
+
+
+##Making sure that the numeric variables are coded as numeric and the 
+##categorical variables are coded as factor variables. 
+str(merged_data)
+
+merged_data$pfx_x <- as.numeric(merged_data$pfx_x)
+
+merged_data$pfx_z <- as.numeric(merged_data$pfx_z)
+
+merged_data$batter <-as.factor(merged_data$batter)
+merged_data$pitcher <- as.factor(merged_data$pitcher)
+
+merged_data$pitch_type <- as.factor(merged_data$pitch_type)
+
+
+##Changing the factor variable into integers so that 
+##I can fit this variable into XGboost. 
+##R does this in alphabetical order so the pitch type closest to the letter A
+##will receive a 1 and the next will receive a 2 and so on.
+merged_data$pitch_type <- as.integer(merged_data$pitch_type)
+
+
+##Removing observations that have NAs
+merged_data <- na.omit(merged_data)
+
+
+
+
+##Checking for multicollinearity among numeric variables
+cor(merged_data[,c("release_speed", "balls", "strikes", 
+                   "pfx_x", "pfx_z", "plate_x",
+                   "plate_z", "sz_top", "sz_bot")])
+
+##Nothing too crazy although the correlation between sz_top and sz_bot 
+##may raise some concern as well as
+##release speed and the vertical movement of the ball. 
+
+
+
+##Fitting the XGboost model
+library(xgboost)
+
+set.seed(124)
+
+n_rows <- nrow(merged_data)
+
+#Select a random sample of 75% of the observations from the merged data for training
+random_indices <- sample(n_rows, size = round(n_rows*0.75))
+
+subset_train <- merged_data[random_indices, ]
+
+#the rest of the data is now the test data
+subset_test <- merged_data[-(random_indices), ]
+
+
+
+##Determining the number of boosting rounds to prevent overfitting the model.
+##I am using the model with all variables besides pitch_id, pitcher, and batter, 
+##as those variables are too specific and will most likely lead to overfitting. 
+boosting_vec <- c(100,250,500,750,1000)
+error_matrix <- matrix(nrow = 2,
+                       ncol = length(boosting_vec))
+for(i in 1: length(boosting_vec)){
+  xg.fit <- xgboost(data = 
+                      as.matrix(subset_train[,c("release_speed", 
+                                                "balls" ,"strikes" ,"plate_x",
+                                                "plate_z", "sz_top",  "sz_bot", 
+                                                "pfx_x", "pfx_z","pitch_type")]), 
+                    label = subset_train$swing, 
+                    nrounds = boosting_vec[i], 
+                    objective= "binary:logistic", 
+                    early_stopping_rounds = 3)
+
+
+predictXG_test = 1*(predict(xg.fit, 
+                            as.matrix(subset_test[,c("release_speed", "balls",
+                                                     "strikes" ,"plate_x",
+                                                     "plate_z", "sz_top",  
+                                                     "sz_bot", "pfx_x",
+                                                     "pfx_z", "pitch_type")]), 
+                            type = "response") > 0.5)
+
+
+error_test <- mean(predictXG_test != subset_test$swing)
+error_matrix[1,i] <- error_test
+
+predictXG_train = 1*(predict(xg.fit, 
+                             as.matrix(subset_train[,c("release_speed", "balls",
+                                                       "strikes" ,"plate_x",
+                                                       "plate_z", "sz_top",  
+                                                       "sz_bot", "pfx_x",
+                                                       "pfx_z", "pitch_type")]), 
+                             type = "response") > 0.5)
+
+error_train <- mean(predictXG_train != subset_train$swing)
+error_matrix[2,i] <- error_train
+}
+
+
+error_data <- data.frame(error_matrix)
+names(error_data) <- c("100", 
+                 "250",
+                 "500",
+                 "750",
+                 "1000") 
+row.names(error_data) <- c("error Testing",
+                             "error Training")
+                        
+
+error_data
+
+
+##We start to see evidence of overfitting between 500 and 750 iterations 
+##so I will keep the number of iterations at 500. 
+
+
+
+xg.fit <- xgboost(data = as.matrix(subset_train[,c("release_speed", "balls" ,
+                                                   "strikes" ,"plate_x" ,
+                                                   "plate_z", "sz_top",  "sz_bot",
+                                                   "pfx_x", "pfx_z",
+                                                   "pitch_type")]), 
+                  label = subset_train$swing, 
+                  nrounds = 500, 
+                  objective= "binary:logistic", 
+                  early_stopping_rounds = 3)
+
+
+predictXG_test = 1*(predict(xg.fit, 
+                            as.matrix(subset_test[,c("release_speed", "balls" ,
+                                                     "strikes" ,"plate_x" ,"plate_z", 
+                                                     "sz_top",  "sz_bot", "pfx_x", 
+                                                     "pfx_z", "pitch_type")]), 
+                            type = "response") > 0.5)
+
+
+error_test <- mean(predictXG_test != subset_test$swing)
+
+error_test
+
+##we can see that the model performs very well with an accuracy of about 86.5%
+
+##Looking at the gain of each variable to see if I can 
+##remove variables to create a more simple model. 
+importance <- xgb.importance(model = xg.fit)
+importance
+
+
+##Removing pitch_type, release_speed, and balls as their gain is very low. 
+final.xg.fit2 <- xgboost(data = as.matrix(subset_train[,c("strikes","plate_x","plate_z",
+                                                          "sz_top","sz_bot", "pfx_x", 
+                                                          "pfx_z")]), 
+                         label = subset_train$swing, 
+                         nrounds = 500, 
+                         objective= "binary:logistic", 
+                         early_stopping_rounds = 3)
+
+predictXG_test2 = 1*(predict(final.xg.fit2, 
+                             as.matrix(subset_test[,c("strikes" ,"plate_x" ,"plate_z", 
+                                                      "sz_top","sz_bot", "pfx_x", 
+                                                      "pfx_z")]), 
+                             type = "response") > 0.5)
+
+
+error_test2 <- mean(predictXG_test2 != subset_test$swing)
+error_test2
+
+##Model performs slightly worse with 86% accuracy, 
+##but this is worth it as there was only a 0.5% difference with a more simple model. 
+
+
+##Checking gain metric again just to see important predictors
+importance2 <- xgb.importance(model = final.xg.fit2)
+importance2
+
+
+
+
+##Removing key variables to see how the model performs. 
+##This is just to make sure there are no 
+##underlying issues that may cause some overfitting.
+xg.fit.bad.var <-  xgboost(data = as.matrix(subset_train[,c("strikes" , "pfx_x", 
+                                                            "pfx_z")]), 
+                           label = subset_train$swing, 
+                           nrounds = 500, 
+                           objective= "binary:logistic", 
+                           early_stopping_rounds = 2)
+
+predictXG_test3 = 1*(predict(xg.fit.bad.var, 
+                             as.matrix(subset_test[,c("strikes", "pfx_x", "pfx_z")]), 
+                             type = "response") > 0.5)
+
+
+
+#model performs with 60% accuracy so not nearly as close as the final model. 
+##This is what we would expect.
+error_test3 <- mean(predictXG_test3 != subset_test$swing)
+error_test3
+
+
+
+
+year3 <- read_csv("year3.csv")
+
+##cleaning data for model fitting. 
+##I want to make sure the numeric variables and factor variables
+##are coded as such in R. 
+
+str(year3)
+
+year3$plate_x <- as.numeric(year3$plate_x)
+
+year3$pfx_x <- as.numeric(year3$pfx_x)
+
+year3$sz_top <- as.numeric(year3$sz_top)
+
+##Fitting model
+SwingProbability <- predict(final.xg.fit2, 
+                            as.matrix(year3[,c("strikes" ,"plate_x" ,
+                                               "plate_z","sz_top", 
+                                               "sz_bot", "pfx_x", "pfx_z")]),
+                            type = "response")
+
+##Creating exact duplicate with SwingProbabilities amended
+year3 <- read_csv("year3.csv")
+
+year3$SwingProbability <- SwingProbability
+write.csv(year3, "validation.csv")
+```
+
+
+\newpage
+
+
+##Evaluating Pitchers Using Swing Probability Model
+
+
+$\newline$ $\indent$ $\indent$ $\indent$The metric that I will be calculating is to help determine the effectiveness of pitchers throwing the ball outside of the strike zone. I will be calculating the average swing probability for pitchers when they throw balls instead of strikes. For every pitch, I calculated whether or not the pitch was in the strike zone. For the width of the strike zone, I used 1.4167 feet and divided it into a positive and negative half to match the scale of the x coordinate of the ball. I assumed that the top and bottom of the strike zone were on the same scale as the vertical placement of the ball. Second, I filtered the data to just pitches that were outside the strike zone. Then, for each pitcher, I calculated their average swing probability. I think it would be wise to include only pitchers above a certain threshold of pitches when evaluating these averages. Below are the top ten and lowest ten pitcher IDs of this metric. 
+  
+
+```{r, echo = FALSE, warning = FALSE, message=FALSE}
+##I am mainly repeating the steps from the chunk of code from Question 1 because I only want R to run this chunk of code for the output. I have set the seed to 124 so the training and testing data will be the same as question 1 so all results will be the same. 
+library(tidyverse) 
+library(gganimate)
+library(cowplot)
+library(repr)
+library(ggplot2)
+library(xgboost)
+set.seed(124)
+
+year1 <- read_csv("year1.csv")
+
+year2 <- read_csv("year2.csv")
+
+
+
+bunt_pitchout_events <- c("hit_by_pitch",
+                          "foul_bunt",
+                          "missed_bunt",
+                          "pitchout",
+                          "bunt_foul_tip",
+                            "foul_pitchout")
+
+
+swing_events <- c("foul",
+                  "hit_into_play",
+                  "swinging_strike",
+                  "foul_tip",
+                  "swinging_strike_blocked")
+
+ 
+year1 <- year1 %>%
+  filter(!(description %in% bunt_pitchout_events)) %>%
+  mutate(swing = 
+           ifelse(description %in% swing_events, 1, 0))
+
+year2 <- year2 %>%
+  filter(!(description %in% bunt_pitchout_events)) %>%
+  mutate(swing = 
+           ifelse(description %in% swing_events, 1, 0))
+
+
+
+merged_data <- rbind(year1,year2)
+
+
+
+merged_data$pfx_x <- as.numeric(merged_data$pfx_x)
+
+merged_data$pfx_z <- as.numeric(merged_data$pfx_z)
+
+
+
+
+
+
+
+n_rows <- nrow(merged_data)
+
+
+random_indices <- sample(n_rows, size = round(n_rows*0.75))
+
+subset_train <- merged_data[random_indices, ]
+
+
+subset_test <- merged_data[-(random_indices), ]
+
+
+
+
+final.xg.fit2 <- xgboost(data = as.matrix(subset_train[,c("strikes" ,"plate_x" ,"plate_z", "sz_top",
+                                                          "sz_bot", "pfx_x", "pfx_z")]), 
+                         label = subset_train$swing, 
+                         nrounds = 500, 
+                         objective= "binary:logistic", 
+                         early_stopping_rounds = 3,
+                         verbose = 0)
+
+
+merged_data$SwingProbabilty <- predict(final.xg.fit2, as.matrix(merged_data[,c("strikes" ,"plate_x" ,"plate_z", "sz_top",  "sz_bot", "pfx_x", "pfx_z")]), type = "response")
+
+
+merged_data2 <- merged_data %>% 
+  group_by(pitch_id) %>%
+  mutate(outside = ifelse(plate_x < -(17/12)/2 |
+                           plate_x > (17/12)/2 | 
+                          plate_z < sz_bot | 
+                          plate_z > sz_top, 
+                          1, 0))
+
+average_swing_prob_outside_zone <- merged_data2 %>%
+  filter(outside == 1) %>%
+  filter(season == 2) %>%
+  group_by(pitcher) %>%
+  summarize(average_prob = mean(SwingProbabilty))
+  
+
+top_ten <- head(average_swing_prob_outside_zone[order(average_swing_prob_outside_zone$average_prob,
+                                                      decreasing = TRUE), ], 10)
+
+
+bottom_ten <- tail(average_swing_prob_outside_zone[order(average_swing_prob_outside_zone$average_prob, decreasing = TRUE), ], 10)
+
+knitr::kable(
+  top_ten,
+  caption = "Top Ten Pitchers")
+
+knitr::kable(
+  bottom_ten,
+  caption = "Bottom Ten Pitchers")
+
+```
+

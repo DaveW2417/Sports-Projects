@@ -1,0 +1,1257 @@
+---
+title: "Master's Project Exploration"
+author: "David Wonesh"
+date: "2024-02-19"
+output: pdf_document
+---
+This is the R Markdown file for my data exploration on the 2018 NFL Passing Data given by the 2021 NFL Big Data Bowl.
+First I will read in the non player tracking data.
+```{r}
+library(tidyverse) 
+library(gganimate)
+library(cowplot)
+library(repr)
+library(ggplot2)
+library(lme4)
+library(xgboost)
+library(randomForest)
+library(pscl)
+library(MASS)
+library(nnet)
+library(lmtest)
+df_games <- read_csv("games.csv", col_types = cols())
+df_players <- read_csv("players.csv", col_types = cols())
+df_plays <- read_csv("plays.csv", col_types = cols())
+df_targetedReceiver <- read_csv("targetedReceiver.csv",
+                      col_types = cols())
+```
+
+Now I will read in the player tracking data. This tracking data is taken from 17 csv files with each data frame corresponding to all the plays from all the games in each week of football. There are 17 weeks of football from the 2018 NFL season. Therefore reading in the data requires it to be done iteratively by week. For the sake of not having a lot of data, I will only be reading in the first week. 
+```{r}
+weeks <- c(12,13,14)
+df_tracking <- data.frame()
+for(w in weeks){
+  
+  df_tracking_temp <- read_csv(paste0("C:/Users/David/Downloads/nfl-big-data-bowl-2021/week",w,".csv"))
+                               
+  
+  df_tracking <- rbind(df_tracking_temp, df_tracking)
+}
+
+```
+
+Some cleaning to have the proper x and y coordinates for play directions that go left just so that every play is orientated the same way. 
+```{r}
+df_tracking <- df_tracking %>%
+  mutate(x = ifelse(playDirection == "left", 120 - x ,x),
+         y = ifelse(playDirection == "left", 53.3 - y, y))
+
+```
+
+
+Now I will merge all the tracking and non tracking data into one data set where we will match the proper game and play IDs to the data. This data set will be called df_merged. I will shrink this dataset again so that we will only consider the first play of the first game of the first week which is PHI vs ATL.
+```{r}
+df_merged <- inner_join(df_games,
+                        df_plays,
+                        by = c("gameId" = "gameId"))
+df_merged_new <- inner_join(df_games,
+                        df_plays,
+                        by = c("gameId" = "gameId"))
+
+df_merged <- inner_join(df_merged,
+                        df_tracking,
+                        by = c("gameId" = "gameId",
+                               "playId" = "playId"))
+df_merged_new <- inner_join(df_merged_new,
+                        df_tracking,
+                        by = c("gameId" = "gameId",
+                               "playId" = "playId"))
+
+df_merged <- inner_join(df_merged,
+                        df_targetedReceiver,
+                        by = c("gameId" = "gameId",
+                               "playId" = "playId"))
+
+
+
+```
+
+
+I want to know when the ball is thrown and when the ball arrives so I am just parsing the data to see just the stats of the football for the first play.
+
+```{r}
+###Filtering just for the games associated with Miami Dolphins
+
+df_merged <- df_merged %>%
+  filter(homeTeamAbbr == "MIA" | visitorTeamAbbr == "MIA")
+
+df_merged_new <- df_merged_new %>%
+  filter(homeTeamAbbr == "MIA" | visitorTeamAbbr == "MIA")
+
+
+df_merged <- df_merged %>%
+  group_by(gameId,playId) %>%
+  filter(frameId >= min(frameId[event == "ball_snap"])) %>%
+  ungroup()
+
+
+df_merged_new <- df_merged_new %>%
+  group_by(gameId,playId) %>%
+  filter(frameId >= min(frameId[event == "ball_snap"])) %>%
+  ungroup()
+
+
+
+##Removing broken plays
+bad_info <- df_merged %>%
+  filter(gameId == 2018101404, playId == 2003)
+
+
+
+df_merged <- df_merged %>%
+  anti_join(bad_info, by = c("gameId", "playId"))
+
+
+bad_info_new <- df_merged_new %>%
+  filter(gameId == 2018120206, playId == 3991, frameId >= 71)
+df_merged_new <- df_merged_new %>%
+  anti_join(bad_info_new, by = c("gameId", "playId", "frameId"))
+
+view(df_merged_new[df_merged_new$gameId == 2018120206 & 
+                      df_merged_new$playId == 3991 &
+                      df_merged_new$frameId == 71,])
+
+
+df_merged <- df_merged %>% 
+  ##Here we add a variable called "sideOfBall" which tracks which team is 
+##on defense so that we can apply this to defensive players.
+  
+  mutate(sideOfBall = ifelse(
+    ((team == "home") &
+       (possessionTeam == homeTeamAbbr))|
+      ((team == "away") &
+         (possessionTeam == visitorTeamAbbr)), 
+    "offense",
+    "defense"),
+    
+    ##Now we specifically label which team is on defense by creating a new variable
+    ##called defensive team
+  defensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                         visitorTeamAbbr,
+                         homeTeamAbbr),
+  offensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                         homeTeamAbbr,
+                         visitorTeamAbbr)) %>%
+  group_by(gameId,playId,frameId) %>%
+    
+  mutate(distToFootball = sqrt((x - x[displayName == "Football"])^2 + (y - y[displayName == "Football"])^2)) %>%
+  ungroup()
+
+
+df_merged_new <- df_merged_new %>% 
+  ##Here we add a variable called "sideOfBall" which tracks which team is 
+##on defense so that we can apply this to defensive players.
+  
+  mutate(sideOfBall = ifelse(
+    ((team == "home") &
+       (possessionTeam == homeTeamAbbr))|
+      ((team == "away") &
+         (possessionTeam == visitorTeamAbbr)), 
+    "offense",
+    "defense"),
+    
+    ##Now we specifically label which team is on defense by creating a new variable
+    ##called defensive team
+  defensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                         visitorTeamAbbr,
+                         homeTeamAbbr),
+  offensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                         homeTeamAbbr,
+                         visitorTeamAbbr)) %>%
+  group_by(gameId,playId,frameId) %>%
+    
+  mutate(distToFootball = sqrt((x - x[displayName == "Football"])^2 + (y - y[displayName == "Football"])^2)) %>%
+  ungroup()
+
+
+
+
+df_defense_new <- df_merged_new %>%
+  filter(sideOfBall == "defense")
+
+df_defense_new <- df_defense_new %>%
+  filter(!is.na(nflId))
+
+df_offense_new <- df_merged_new %>%
+  filter(sideOfBall == "offense" & position != "QB")
+
+df_offense_new <- df_offense_new %>%
+  filter(!is.na(nflId))
+
+
+df_defense <- df_merged %>%
+  filter(sideOfBall == "defense")
+
+df_defense <- df_defense %>%
+  filter(!is.na(nflId))
+
+df_offense <- df_merged %>%
+  filter(sideOfBall == "offense" & position != "QB")
+
+df_offense <- df_offense %>%
+  filter(!is.na(nflId))
+
+
+
+
+
+
+
+unique(df_merged$gameId)
+
+unique(df_merged_new$gameId)
+
+
+df_defense_new1 <- df_defense_new %>%
+  filter(gameId == 2018112504)
+
+df_defense_new2 <- df_defense_new %>%
+  filter(gameId == 2018120206)
+
+df_defense_new3 <- df_defense_new %>%
+  filter(gameId == 2018120906)
+
+df_offense_new1 <- df_offense_new %>%
+  filter(gameId == 2018112504)
+
+df_offense_new2 <- df_offense_new %>%
+  filter(gameId == 2018120206)
+
+df_offense_new3 <- df_offense_new %>%
+  filter(gameId == 2018120906)
+
+df_merged_new1 <- df_merged_new %>%
+  filter(gameId == 2018112504)
+
+df_merged_new2 <- df_merged_new %>%
+  filter(gameId == 2018120206)
+
+df_merged_new3 <- df_merged_new %>%
+  filter(gameId == 2018120906)
+
+##These are the gameIds for Miami Games
+
+df_defense1 <- df_defense %>%
+  filter(gameId == 2018090903) 
+
+df_defense2 <- df_defense %>%
+  filter(gameId == 2018091604)
+
+df_defense3 <- df_defense %>%
+  filter(gameId ==2018092306)
+
+
+df_defense4 <- df_defense %>%
+  filter(gameId == 2018093006)
+
+df_defense5 <- df_defense %>%
+  filter(gameId == 2018100702)
+
+df_defense6 <- df_defense %>%
+  filter(gameId == 2018101404)
+
+df_defense7 <- df_defense %>%
+  filter(gameId == 2018102106)
+
+df_defense8 <- df_defense %>%
+  filter(gameId == 2018102500)
+
+df_defense9 <- df_defense %>%
+  filter(gameId == 2018110404)
+
+
+
+
+###########################################
+
+df_offense1 <- df_offense %>%
+  filter(gameId == 2018090903) 
+
+df_offense2 <- df_offense %>%
+  filter(gameId == 2018091604)
+
+df_offense3 <- df_offense %>%
+  filter(gameId == 2018092306)
+
+df_offense4 <- df_offense %>%
+  filter(gameId == 2018093006)
+
+df_offense5 <- df_offense %>%
+  filter(gameId == 2018100702)
+
+df_offense6 <- df_offense %>%
+  filter(gameId == 2018101404)
+
+df_offense7 <- df_offense %>%
+  filter(gameId == 2018102106)
+
+df_offense8 <- df_offense %>%
+  filter(gameId == 2018102500)
+
+df_offense9 <- df_offense %>%
+  filter(gameId == 2018110404)
+############################################
+
+df_merged1 <- df_merged %>%
+ filter(gameId == 2018090903)
+
+df_merged2 <- df_merged %>%
+ filter(gameId == 2018091604)
+
+
+df_merged3 <- df_merged %>%
+ filter(gameId == 2018092306)
+
+df_merged4 <- df_merged %>%
+ filter(gameId == 2018093006)
+
+df_merged5 <- df_merged %>%
+  filter(gameId == 2018100702)
+
+df_merged6 <- df_merged %>%
+  filter(gameId == 2018101404)
+
+df_merged7 <- df_merged %>%
+  filter(gameId == 2018102106)
+
+df_merged8 <- df_merged %>%
+  filter(gameId == 2018102500)
+
+df_merged9 <- df_merged %>%
+  filter(gameId == 2018110404)
+```
+
+
+
+
+
+Now I want to calculate the distance from an offender to the nearest defender and vice versa.
+```{r}
+##calculating distance
+
+
+##calculating distance from receiver to nearest defender
+
+
+###################################################################
+df_merged_no_football1 <- df_merged1 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(gameId,playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_def = ifelse(sideOfBall == "offense" & position != "QB",
+                                      min(sqrt((x - as.numeric(df_defense1$x[df_defense1$gameId %in% gameId & df_defense1$playId %in% playId & df_defense1$frameId %in% frameId]))^2 + (y - as.numeric(df_defense1$y[df_defense1$gameId %in% gameId & df_defense1$playId %in% playId & df_defense1$frameId %in% frameId]))^2)), NA))
+
+################################################################
+df_merged_no_football2 <- df_merged2 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(gameId,playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_def = ifelse(sideOfBall == "offense" & position != "QB",
+                                      min(sqrt((x - as.numeric(df_defense2$x[df_defense2$gameId %in% gameId & df_defense2$playId %in% playId & df_defense2$frameId %in% frameId]))^2 + (y - as.numeric(df_defense2$y[df_defense2$gameId %in% gameId & df_defense2$playId %in% playId & df_defense2$frameId %in% frameId]))^2)), NA))
+
+
+
+################################################################
+df_merged_no_football3 <- df_merged3 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(gameId,playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_def = ifelse(sideOfBall == "offense" & position != "QB",
+                                      min(sqrt((x - as.numeric(df_defense3$x[df_defense3$gameId %in% gameId & df_defense3$playId %in% playId & df_defense3$frameId %in% frameId]))^2 + (y - as.numeric(df_defense3$y[df_defense3$gameId %in% gameId & df_defense3$playId %in% playId & df_defense3$frameId %in% frameId]))^2)), NA))
+
+
+################################################################
+df_merged_no_football4 <- df_merged4 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(gameId,playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_def = ifelse(sideOfBall == "offense" & position != "QB",
+                                      min(sqrt((x - as.numeric(df_defense4$x[df_defense4$gameId %in% gameId & df_defense4$playId %in% playId & df_defense4$frameId %in% frameId]))^2 + (y - as.numeric(df_defense4$y[df_defense4$gameId %in% gameId & df_defense4$playId %in% playId & df_defense4$frameId %in% frameId]))^2)), NA))
+
+
+#####
+
+
+view(df_offense_new1[df_offense_new1$playId == 3114 & df_offense_new1$frameId == 11,])
+
+intersect(df_merged_new1$playId, df_offense_new1$playId)
+
+unique(df_merged_new1$playId)
+
+
+bad_info_new1 <- df_merged_new1 %>%
+  filter(playId == 3114)
+df_merged_new1 <- df_merged_new1 %>%
+  anti_join(bad_info_new1, by = c("playId"))
+##calculating distance from defender to nearest receiver
+
+df_merged_no_football_new1 <- df_merged_new1 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense_new1$x[df_offense_new1$playId %in% playId & df_offense_new1$frameId %in% frameId]))^2 + (y - as.numeric(df_offense_new1$y[df_offense_new1$playId %in% playId & df_offense_new1$frameId %in% frameId]))^2)), NA))
+
+################################################################
+
+df_merged_no_football_new2 <- df_merged_new2 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense_new2$x[df_offense_new2$playId %in% playId & df_offense_new2$frameId %in% frameId]))^2 + (y - as.numeric(df_offense_new2$y[df_offense_new2$playId %in% playId & df_offense_new2$frameId %in% frameId]))^2)), NA))
+
+
+
+################################################################
+
+df_merged_no_football_new3 <- df_merged_new3 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense_new3$x[df_offense_new3$playId %in% playId & df_offense_new3$frameId %in% frameId]))^2 + (y - as.numeric(df_offense_new3$y[df_offense_new3$playId %in% playId & df_offense_new3$frameId %in% frameId]))^2)), NA))
+
+
+################################################################
+
+
+###################################################################
+df_merged_no_football1 <- df_merged1 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense1$x[df_offense1$playId %in% playId & df_offense1$frameId %in% frameId]))^2 + (y - as.numeric(df_offense1$y[df_offense1$playId %in% playId & df_offense1$frameId %in% frameId]))^2)), NA))
+
+################################################################
+df_merged_no_football2 <- df_merged2 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense2$x[df_offense2$playId %in% playId & df_offense2$frameId %in% frameId]))^2 + (y - as.numeric(df_offense2$y[df_offense2$playId %in% playId & df_offense2$frameId %in% frameId]))^2)), NA))
+
+
+
+################################################################
+df_merged_no_football3 <- df_merged3 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense3$x[df_offense3$playId %in% playId & df_offense3$frameId %in% frameId]))^2 + (y - as.numeric(df_offense3$y[df_offense3$playId %in% playId & df_offense3$frameId %in% frameId]))^2)), NA))
+
+
+################################################################
+df_merged_no_football4 <- df_merged4 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense4$x[df_offense4$playId %in% playId & df_offense4$frameId %in% frameId]))^2 + (y - as.numeric(df_offense4$y[df_offense4$playId %in% playId & df_offense4$frameId %in% frameId]))^2)), NA))
+
+
+###################################################################
+df_merged_no_football5 <- df_merged5 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense5$x[df_offense5$playId %in% playId & df_offense5$frameId %in% frameId]))^2 + (y - as.numeric(df_offense5$y[df_offense5$playId %in% playId & df_offense5$frameId %in% frameId]))^2)), NA))
+
+################################################################
+df_merged_no_football6 <- df_merged6 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense6$x[df_offense6$playId %in% playId & df_offense6$frameId %in% frameId]))^2 + (y - as.numeric(df_offense6$y[df_offense6$playId %in% playId & df_offense6$frameId %in% frameId]))^2)), NA))
+
+
+
+################################################################
+df_merged_no_football7 <- df_merged7 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense7$x[df_offense7$playId %in% playId & df_offense7$frameId %in% frameId]))^2 + (y - as.numeric(df_offense7$y[df_offense7$playId %in% playId & df_offense7$frameId %in% frameId]))^2)), NA))
+
+
+################################################################
+df_merged_no_football8 <- df_merged8 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense8$x[df_offense8$playId %in% playId & df_offense8$frameId %in% frameId]))^2 + (y - as.numeric(df_offense8$y[df_offense8$playId %in% playId & df_offense8$frameId %in% frameId]))^2)), NA))
+
+
+df_merged8
+
+################################################################
+df_merged_no_football9 <- df_merged9 %>%
+  filter(!is.na(nflId)) %>%
+  group_by(playId, frameId, nflId) %>%
+  mutate(dist_to_Nearest_off = ifelse(sideOfBall == "defense",
+                                      min(sqrt((x - as.numeric(df_offense9$x[df_offense9$playId %in% playId & df_offense9$frameId %in% frameId]))^2 + (y - as.numeric(df_offense9$y[df_offense9$playId %in% playId & df_offense9$frameId %in% frameId]))^2)), NA))
+
+df_merged_no_football <- rbind(df_merged_no_football1,df_merged_no_football2,df_merged_no_football3,
+                          df_merged_no_football4,df_merged_no_football5,df_merged_no_football6,
+                          df_merged_no_football7,df_merged_no_football9)
+
+df_merged_no_football_new <- rbind(df_merged_no_football_new1,df_merged_no_football_new2,df_merged_no_football_new3)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+Now I will try to create a binary variable that establishes whether the offensive receiver was targeted. 0 = not targeted, 1 = targeted
+```{r}
+
+sack_info <- df_merged_no_football %>%
+  filter(event %in% c("qb_sack", "qb_strip_sack", "pass_shovel", "qb_spike"))%>%
+  dplyr::select(gameId, playId) %>%
+  unique()
+
+
+sack_info_new <- df_merged_no_football_new %>%
+  filter(event %in% c("qb_sack", "qb_strip_sack", "pass_shovel", "qb_spike"))%>%
+  dplyr::select(gameId, playId) %>%
+  unique()
+
+
+df_merged_no_football <- df_merged_no_football %>%
+  anti_join(sack_info, by = c("gameId", "playId"))
+
+df_merged_no_football_new <- df_merged_no_football_new %>%
+  anti_join(sack_info_new, by = c("gameId", "playId"))
+
+
+passArrivalEvents <- c('pass_arrived', "pass_outcome_incomplete", "pass_outcome_complete",
+                       "pass_outcome_caught", "pass_outcome_interception")
+
+
+
+
+df_merged_no_football_defense_new <- df_merged_no_football_new %>%
+  filter(sideOfBall == "defense")
+
+df_merged_no_football_offense_new <- df_merged_no_football_new %>%
+  filter(sideOfBall == "offense")
+
+
+
+
+df_merged_no_football_defense <- df_merged_no_football %>%
+  filter(sideOfBall == "defense")
+
+df_merged_no_football_offense <- df_merged_no_football %>%
+  filter(sideOfBall == "offense")
+
+
+
+df_merged_no_football_defense_target_new <- df_merged_no_football_defense_new %>%
+   group_by(gameId,playId,nflId) %>%
+  filter(event %in% passArrivalEvents) %>%
+  filter(frameId == min(frameId)) %>%
+  mutate(target = ifelse(distToFootball == min(df_merged_no_football_defense_new$distToFootball[df_merged_no_football_defense_new$gameId == gameId & df_merged_no_football_defense_new$playId == playId & df_merged_no_football_defense_new$frameId == frameId]), 1, 0))
+
+
+
+
+
+
+
+
+df_merged_no_football_defense_target <- df_merged_no_football_defense %>%
+   group_by(gameId,playId,nflId) %>%
+  filter(event %in% passArrivalEvents) %>%
+  filter(frameId == min(frameId)) %>%
+  mutate(target = ifelse(distToFootball == min(df_merged_no_football_defense$distToFootball[df_merged_no_football_defense$gameId == gameId & df_merged_no_football_defense$playId == playId & df_merged_no_football_defense$frameId == frameId]), 1, 0))
+
+
+
+
+
+unique(df_merged_no_football_defense$event[df_merged_no_football_defense$gameId == 2018100702 &
+                                             df_merged_no_football_defense$playId == 3963])
+
+
+
+df_merged_no_football_defense_new <- df_merged_no_football_defense_new %>%
+  group_by(gameId,playId,frameId,nflId) %>%
+  mutate(target = df_merged_no_football_defense_target_new$target[
+    df_merged_no_football_defense_target_new$gameId == gameId &
+      df_merged_no_football_defense_target_new$playId == playId &
+      df_merged_no_football_defense_target_new$nflId == nflId])
+
+
+
+
+
+
+df_merged_no_football_defense <- df_merged_no_football_defense %>%
+  group_by(gameId,playId,frameId,nflId) %>%
+  mutate(target = df_merged_no_football_defense_target$target[
+    df_merged_no_football_defense_target$gameId == gameId &
+      df_merged_no_football_defense_target$playId == playId &
+      df_merged_no_football_defense_target$nflId == nflId])
+
+
+
+```
+
+
+
+
+Let's fit some models
+```{r}
+
+
+df_merged_final <-  df_merged_no_football_defense %>%
+  filter(defensiveTeam == "MIA")
+
+df_merged_final_new <- df_merged_no_football_defense_new %>%
+  filter(defensiveTeam == "MIA")
+
+unique(df_merged_final$gameId)
+
+df_merged_train <- df_merged_final %>%
+  filter(gameId == 2018090903 | gameId == 2018091604 | gameId == 2018092306 |
+          gameId == 2018093006 | gameId == 2018100702 | gameId == 2018101404|
+           gameId == 2018102106)
+
+
+df_merged_test <- df_merged_final %>%
+  filter(gameId == 2018110404)
+
+df_merged_test <- rbind(df_merged_test,df_merged_final_new)
+
+view(df_merged_test[1,])
+
+num_cols <- ncol(df_merged_test)
+
+# Remove the last four columns
+df_merged_test <- df_merged_test[, !colnames(df_merged_test) %in% c("predicted_probabilities",
+                                                                    "prob_sum",
+                                                                    "probability_normalized",
+                                                                    "pred_target")]
+
+
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId,playId) %>%
+  filter(frameId >= min(frameId[event == "ball_snap"]) & frameId <= min(frameId[event == "pass_forward"]))
+
+df_merged_train <- df_merged_train %>%
+  group_by(playId, frameId) %>%
+  filter(n() == 7) %>%
+  ungroup()
+
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId,playId) %>%
+  filter(frameId >= min(frameId[event == "ball_snap"]) & frameId <= min(frameId[event == "pass_forward"]))
+
+df_merged_test <- df_merged_test %>%
+  group_by(playId, frameId) %>%
+  filter(n() == 7) %>%
+  ungroup()
+
+
+df_merged_train <- transform(df_merged_train, 
+                       gameClock = as.character(gameClock)) # Convert to character if not already
+
+df_merged_test <- transform(df_merged_test, 
+                       gameClock = as.character(gameClock))
+
+
+
+time_parts1 <- strsplit(df_merged_train$gameClock, ":")  # Split HMS variable into hours, minutes, and seconds
+
+
+hours1 <- numeric(length(time_parts1))
+minutes1 <- numeric(length(time_parts1))
+seconds1 <- numeric(length(time_parts1))
+
+
+for (i in seq_along(time_parts1)) {
+  time_part1 <- time_parts1[[i]]
+  
+  # Check the length of time_part
+  if (length(time_part1) == 3) {
+    # If all components (hours, minutes, seconds) are present, extract them
+    hours1[i] <- as.numeric(time_part1[1])
+    minutes1[i] <- as.numeric(time_part1[2])
+    seconds1[i] <- as.numeric(time_part1[3])
+  } else {
+    # If any component is missing, set them to 0
+    hours1[i] <- 0
+    minutes1[i] <- 0
+    seconds1[i] <- 0
+  }
+}
+
+
+total_seconds1 <- hours1 * 60 + minutes1 + seconds1/60
+
+# Replace the original HMS variable with the total seconds
+df_merged_train$gameClock <- total_seconds1/60
+
+
+time_parts2 <- strsplit(df_merged_test$gameClock, ":") 
+
+hours2 <- numeric(length(time_parts2))
+minutes2 <- numeric(length(time_parts2))
+seconds2 <- numeric(length(time_parts2))
+
+
+
+for (i in seq_along(time_parts2)) {
+  time_part2 <- time_parts2[[i]]
+  
+  # Check the length of time_part
+  if (length(time_part2) == 3) {
+    # If all components (hours, minutes, seconds) are present, extract them
+    hours2[i] <- as.numeric(time_part2[1])
+    minutes2[i] <- as.numeric(time_part2[2])
+    seconds2[i] <- as.numeric(time_part2[3])
+  } else {
+    # If any component is missing, set them to 0
+    hours2[i] <- 0
+    minutes2[i] <- 0
+    seconds2[i] <- 0
+  }
+}
+
+
+total_seconds2 <- hours2 * 60 + minutes2 + seconds2/60
+
+# Replace the original HMS variable with the total seconds
+df_merged_test$gameClock <- total_seconds2/60
+
+
+
+
+
+sort(unique(df_merged_train$nflId))
+sort(unique(df_merged_test$nflId))
+sort(intersect(df_merged_train$nflId,df_merged_test$nflId))
+
+
+
+unique(df_merged_test$playId[df_merged_test$nflId == c(2561147,2561316)])
+
+bad_info <- df_merged_test %>%
+  filter(playId ==95 |playId ==794 | playId == 858 | playId == 883)
+
+df_merged_test <- df_merged_test %>%
+  anti_join(bad_info, by = c("playId"))
+
+
+
+quarter + down + yardsToGo+ yardlineNumber + gameClock + dist_to_Nearest_def + distToFootball
+##GLMM model
+
+logit.mod <- glmer(target ~ down + yardsToGo+ yardlineNumber + gameClock + dist_to_Nearest_off + distToFootball + (1|nflId), data = df_merged_train , family = binomial(link = "logit"), control = glmerControl(check.conv.grad = .makeCC("warning", tol = 0.003, relTol = NULL)))
+
+logit.mod.red <- glm(target ~ down + yardsToGo+ yardlineNumber + gameClock + dist_to_Nearest_off + distToFootball, data = df_merged_train , family = binomial(link = "logit"))
+
+summary(logit.mod)
+
+
+sum <- summary(logit.mod)
+sum$vcov
+heatmap(as.matrix(sum$vcov))
+anova(logit.mod,logit.mod.red)
+
+
+
+summary(logit.mod)
+
+random_intercepts <- ranef(logit.mod)
+nfl_rand_effects <- random_intercepts$nflId
+nfl_rand_effects <- data.frame(nfl_rand_effects)
+nfl_rand_effects$prob <- plogis(nfl_rand_effects$X.Intercept.)
+
+nfl_rand_effects$name <- c("Reshad Jones","T.J. McDonald","Kiko Alonso","Walt Aikens","Bobby McCain",
+                           "Xavien Howard", "Cordrea Tankersley","Raekwon McMillan", 
+                           "Chase Allen","Torry McTyer", "Maurice Smith", "Minkah Fitzpatrick",
+                           "Jerome Baker")
+
+
+nfl_rand_effects$snap_pct <- c(75.76,87.42,92.19,3.03,75.57,73.74,
+                               2.66,76.31,1.74,31.77,5.23,86.69,62.26)
+nfl_rand_effects$position <- c("Safety", "Safety/Strong Safety", "Linebacker",
+                               "Strong Safety", "Cornerback", "Cornerback",
+                               "Cornerback", "Linebacker", "Linebacker", "Cornerback",
+                               "Free Safety", "Safety/Strong Safety", "Linebacker")
+
+view(nfl_rand_effects)
+
+df_merged_train$displayName[df_merged_train$nflId ==2552434][1]
+
+
+#####reduced yeah
+####################################
+logit.mod.red <- glmer(target ~ yardsToGo + dist_to_Nearest_off + distToFootball + dist_to_Nearest_off + distToFootball + (1|nflId), data = df_merged_train, family = binomial(link = "logit"),
+                   control = glmerControl(check.conv.grad = .makeCC("warning", tol = 0.003, relTol = NULL)))
+
+summary(logit.mod.red)
+
+
+lrt <- anova(logit.mod.red, logit.mod)
+lrt
+
+##################
+fitted <- fitted(logit.mod)
+rd=resid(logit.mod, "deviance")
+
+plot(fitted,rd, ylab = "Deviance Residuals", main= "Deviance Residuals vs Fitted Values")
+
+mean(rd)
+
+
+
+cor(df_merged_train)
+
+
+
+df_merged_test$predicted_probabilities <- predict(logit.mod, newdata = df_merged_test, type = "response")
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_log_test <- table(df_merged_test$target, df_merged_test$pred_target)
+
+contingency_table_log_test
+
+
+###################################################
+
+df_merged_train$predicted_probabilities <- predict(logit.mod, newdata = df_merged_train, type = "response")
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_log_train <- table(df_merged_train$target, df_merged_train$pred_target)
+
+contingency_table_log_train
+
+
+
+
+unique(df_merged_test$playId)
+
+
+summary()
+############################
+##Multinomial logistic regression
+
+multi.mod <- multinom(target ~  quarter + down + yardsToGo+ yardlineNumber + gameClock + dist_to_Nearest_def + distToFootball,data = df_merged_train)
+
+coef_summary_value <- summary(multi.mod)$coefficients
+coef_summary_std <- summary(multi.mod)$standard.errors
+
+
+z_values <- coef_summary_value / coef_summary_std
+
+
+p_values <- 2 * (1 - pnorm(abs(z_values)))
+
+
+coefficients_summary <- data.frame(
+  "Coefficient" = c("Intercept", "quarter", "down", "yardsToGo", "yardlineNumber",
+                    "gameClock", "dist_to_Nearest_def", "distToFootball"),
+  "Estimate" = coef_summary_value,
+  "Std. Error" = coef_summary_std,
+  "z-value" = z_values,
+  "p-value" = p_values
+)
+
+coefficients_summary
+
+
+
+df_merged_test$predicted_probabilities <- predict(multi.mod, newdata = df_merged_test, type = "probs")
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_log_test <- table(df_merged_test$target, df_merged_test$pred_target)
+
+contingency_table_log_test
+
+
+####
+
+df_merged_train$predicted_probabilities <- predict(multi.mod, newdata = df_merged_train, type = "probs")
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_log_train <- table(df_merged_train$target, df_merged_train$pred_target)
+
+contingency_table_log_train
+
+############################
+
+down + yardsToGo+ yardlineNumber + gameClock + dist_to_Nearest_off + distToFootball
+
+
+
+##XGboost model
+xg.fit <- xgboost(data = 
+                      as.matrix(df_merged_train[, c(
+                                                     "playId",
+                                                    "gameClock",
+                                                    "yardlineNumber",
+                                                   "nflId")]), 
+                    label = df_merged_train$target, 
+                    nrounds =50, 
+                    objective= "binary:logistic", 
+                    early_stopping_rounds = 3)
+importance <- xgb.importance(model = xg.fit)
+importance
+
+
+
+
+
+df_merged_test$predicted_probabilities <- predict(xg.fit,
+                                                   as.matrix(df_merged_test[, c(
+                                                     "playId",
+                                                    "gameClock",
+                                                    "yardlineNumber",
+                                                   "nflId")]),
+                                                   type = "response")
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_test <- df_merged_test %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_xg_test <- table(df_merged_test$target, df_merged_test$pred_target)
+  
+
+contingency_table_xg_test
+
+?table()
+
+###################################################
+
+df_merged_train$predicted_probabilities <- predict(xg.fit,
+                                                   as.matrix(df_merged_train[, c(
+                                                     "playId",
+                                                    "gameClock",
+                                                    "yardlineNumber",
+                                                   "nflId")]),
+                                                   type = "response")
+hist(df_merged_test$frameId)
+median(df_merged_test$frameId)
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId,playId, frameId) %>%
+  mutate(prob_sum = sum(predicted_probabilities),
+         probability_normalized = predicted_probabilities / prob_sum) %>%
+  ungroup()
+
+
+df_merged_train <- df_merged_train %>%
+  group_by(gameId, playId, frameId) %>%
+  mutate(pred_target = ifelse(probability_normalized == max(probability_normalized), 1,0)) %>%
+  ungroup()
+
+
+contingency_table_xg_train <- table(df_merged_train$target, df_merged_train$pred_target)
+rownames(contingency_table_xg_test) <- c("True 0","True 1" )
+colnames(contingency_table_xg_test) <- c("Predicted 0","Predicted 1")
+rownames(contingency_table_xg_train) <- c("True 0","True 1" )
+colnames(contingency_table_xg_train) <- c("Predicted 0","Predicted 1")
+rownames(contingency_table_log_train) <- c("True 0","True 1" )
+colnames(contingency_table_log_train) <- c("Predicted 0","Predicted 1")
+rownames(contingency_table_log_test) <- c("True 0","True 1" )
+colnames(contingency_table_log_test) <- c("Predicted 0","Predicted 1")
+
+
+
+
+contingency_table_xg_train
+contingency_table_xg_test
+contingency_table_log_train
+contingency_table_log_test
+
+
+
+
+
+
+
+
+
+
+
+accuracy <- sum(diag(contingency_table)) / sum(contingency_table)
+
+sensitivity <- contingency_table[2, 2] / sum(contingency_table[2, ])
+
+precision <- contingency_table[2, 2] / sum(contingency_table[, 2])
+
+
+```
+
+
+
+
+```{r}
+
+library(ggplot2)
+install.packages("reshape2")
+install.packages("RColorBrewer")
+library(reshape2)
+library(RColorBrewer)
+cor_matrix <- matrix(c(
+  1, 0.306, -0.054, -0.029, -0.030, -0.079,
+  0.306, 1, -0.081, -0.225, -0.069, -0.211,
+  -0.054, -0.081, 1, 0.020, -0.061, -0.054,
+  -0.029, -0.225, 0.020, 1, 0.019, 0.083,
+  -0.030, -0.069, -0.061, 0.019, 1, -0.090,
+  -0.079, -0.211, -0.054, 0.083, -0.090, 1
+), nrow = 6, ncol = 6, byrow = TRUE)
+
+# Define row and column names
+rownames(cor_matrix) <- c("down", "yardsToGo", "yardlinNumber", "gameClock", "distToNearestOff", "distToFootball")
+colnames(cor_matrix) <- c("down", "yardsToGo", "yardlinNumber", "gameClock", "distToNearestOff", "distToFootball")
+
+# Convert the matrix to a long-format data frame
+melted_cor_matrix <- melt(cor_matrix)
+
+# Create the heatmap
+ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Heatmap of Correlation", x = "", y = "") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), panel.border = element_blank(),
+        panel.background = element_blank(), axis.ticks = element_blank(),
+        legend.justification = c(1, 0), legend.position = "right",
+        legend.direction = "vertical") +
+  guides(fill = guide_colorbar(barwidth = 1, barheight = 7,
+                               title.position = "top", title.hjust = 0.5))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Animating the one play in this dataset:
+```{r}
+xmin <- 0
+xmax <- 53.3 
+hash.right <- 38.35
+hash.left <- 12
+hash.width <- 3.3
+
+plot_title <-as.character("(:29) (No Huddle, Shotgun) M.Ryan pass short left to M.Sanu 
+                          to PHI 10 for 10 yards (S.Jones).")
+#str_trim(gsub("\\s*\\([^\\)]+\\)",as.character("(10:10) (Shotgun) N.Foles pass short left to N.Agholor to PHI 8 for 4 yards (R.Alford).")))
+
+
+
+
+
+ymin <- max(round(min(df_merged$y[df_merged$playId == 218 & df_merged$gameId == 2018090903], na.rm = TRUE) - 60, -1), 0)
+ymax <- min(round(max(df_merged$y[df_merged$playId == 218 & df_merged$gameId == 2018090903], na.rm = TRUE) + 60, -1), 120)
+
+#hash marks
+df.hash <- expand.grid(x = c(0, 23.36667, 29.96667, xmax), y = (10:110))
+df.hash <- df.hash %>% filter(!(floor(y %% 5) == 0))
+df.hash <- df.hash %>% filter(y < ymax, y > ymin)
+
+
+
+##Choosing play to animate
+
+
+df_merged_train$playId[df_merged_train$gameId == 2018090903]
+
+view(df_merged_train[df_merged_train$playId == 218 & df_merged_train$gameId == 2018090903,])
+
+
+
+cols_fill <- c("#ebc034", "#663300", "#170e59")
+cols_col <- c("#000000", "#663300", "#000000")
+
+
+
+
+#plotting
+p <- ggplot(data = df_merged[df_merged$playId == 218 & df_merged$gameId == 2018090903,]) +
+  
+  #setting size and color parameters
+  scale_size_manual(values = c(6, 4, 6), guide = FALSE) + 
+  scale_shape_manual(values = c(21, 16, 21), guide = FALSE) +
+  scale_fill_manual(values = cols_fill, guide = FALSE) + 
+  scale_colour_manual(values = cols_col, guide = FALSE) +
+  
+  #adding hash marks
+  annotate("text", x = df.hash$x[df.hash$x < 55/2], 
+           y = df.hash$y[df.hash$x < 55/2], label = "_", hjust = 0, vjust = -0.2) + 
+  annotate("text", x = df.hash$x[df.hash$x > 55/2], 
+           y = df.hash$y[df.hash$x > 55/2], label = "_", hjust = 1, vjust = -0.2) + 
+  
+  #adding yard lines
+  annotate("segment", x = xmin, 
+           y = seq(max(10, ymin), min(ymax, 110), by = 5), 
+           xend =  xmax, 
+           yend = seq(max(10, ymin), min(ymax, 110), by = 5)) + 
+  
+  #adding field yardline text
+  annotate("text", x = rep(hash.left, 11), y = seq(10, 110, by = 10), 
+           label = c("G   ", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "   G"), 
+           angle = 270, size = 4) + 
+  annotate("text", x = rep((xmax - hash.left), 11), y = seq(10, 110, by = 10), 
+           label = c("   G", seq(10, 50, by = 10), rev(seq(10, 40, by = 10)), "G   "), 
+           angle = 90, size = 4) + 
+  
+  #adding field exterior
+  annotate("segment", x = c(xmin, xmin, xmax, xmax), 
+           y = c(ymin, ymax, ymax, ymin), 
+           xend = c(xmin, xmax, xmax, xmin), 
+           yend = c(ymax, ymax, ymin, ymin), colour = "black") +
+  
+  #adding field interior 
+  annotate("rect", xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, 
+           fill = "dark green", alpha = 0.2) + 
+  
+  #adding players
+  geom_point(data = df_merged[df_merged$playId == 218 & df_merged$gameId == 2018090903,], aes(x = (xmax - y),
+                                      y = x, 
+                                      shape = team,
+                                      fill = team,
+                                      group = nflId,
+                                      size = team,
+                                      colour = team), 
+             alpha = 0.7) +  
+  #adding jersey numbers
+  geom_text(data = df_merged[df_merged$playId == 218 & df_merged$gameId == 2018090903,], aes(x = (xmax-y), y = x, label = jerseyNumber), colour = "white", 
+            vjust = 0.36, size = 3.5) + 
+  
+  #applying plot limits
+  ylim(ymin, ymax) + 
+  coord_fixed() +
+  
+  #applying theme
+  theme_nothing() + 
+  theme(plot.title = element_text()) +
+  
+  #titling plot with play description
+  labs(title = plot_title) +
+  
+  #setting animation parameters
+  transition_time(frameId)  +
+  ease_aes('linear')
+p
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
